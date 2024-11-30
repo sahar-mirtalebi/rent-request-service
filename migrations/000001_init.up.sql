@@ -10,7 +10,4 @@ CREATE TABLE rent_requests (
     payment_status VARCHAR(50) NOT NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (owner_id) REFERENCES "user-service".users(id) ON DELETE CASCADE,
-    FOREIGN KEY (post_id) REFERENCES "post-service".posts(id) ON DELETE CASCADE,
-    FOREIGN KEY (renter_id) REFERENCES "user-service".users(id) ON DELETE CASCADE
 );

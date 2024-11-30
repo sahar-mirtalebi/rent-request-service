@@ -1,51 +1,53 @@
 package rent
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
+	"strings"
 	"time"
 
-	"github.com/labstack/echo/v4"
-	"go.uber.org/zap"
 	"gorm.io/gorm"
 )
 
 type RentService struct {
-	repo   *RentRepository
-	logger *zap.Logger
+	repo *RentRepository
 }
 
-func NewRentService(repo *RentRepository, logger *zap.Logger) *RentService {
-	return &RentService{repo: repo, logger: logger}
+func NewRentService(repo *RentRepository) *RentService {
+	return &RentService{repo: repo}
 }
 
-func (service *RentService) CreateRentRequest(renterID uint, rentRequest struct {
-	PostId    uint      `json:"postId"`
-	StartDate time.Time `json:"startDate"`
-	EndDate   time.Time `json:"endDate"`
-}) (uint, error) {
+var ErrConflict = errors.New("there is alreay a paid request for this period")
+var ErrRecordNotFound = errors.New("rentRequest not found")
+var ErrNotAllowed = errors.New("owner ID mismatch")
+
+func (service *RentService) CreateRentRequest(renterID uint, rentRequest RentDto) (*uint, error) {
+	if !rentRequest.StartDate.Before(rentRequest.EndDate) {
+		return nil, fmt.Errorf("invalid date")
+	}
 
 	rentRequestList, err := service.repo.GetOvelappingRequest(rentRequest.PostId, "Paid", rentRequest.StartDate, rentRequest.EndDate)
 	if err != nil {
-		service.logger.Error("error counting rent requests", zap.Error(err))
-		return 0, echo.NewHTTPError(http.StatusInternalServerError, "error checking existing rent requests")
+		return nil, err
 	}
 
 	if len(rentRequestList) > 0 {
-		return 0, echo.NewHTTPError(http.StatusConflict, "there is already a paid request in this period")
+		return nil, ErrConflict
 	}
 
 	postDetail, err := GetPostByID(rentRequest.PostId)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 
 	numberOfDays := int(rentRequest.EndDate.Sub(rentRequest.StartDate).Hours() / 24)
 	if numberOfDays <= 0 {
-		return 0, echo.NewHTTPError(http.StatusBadRequest, "einvalid date")
+		return nil, fmt.Errorf("bad request")
 	}
 	totalPrice := numberOfDays * int(postDetail.PricePerDay)
 
@@ -62,10 +64,10 @@ func (service *RentService) CreateRentRequest(renterID uint, rentRequest struct 
 	}
 	err = service.repo.AddRentRequest(newRentRequest)
 	if err != nil {
-		service.logger.Error("Error creating rent request", zap.Error(err))
-		return 0, echo.NewHTTPError(http.StatusInternalServerError, "failed to create rent request")
+
+		return nil, err
 	}
-	return newRentRequest.ID, nil
+	return &newRentRequest.ID, nil
 }
 
 type PostResponseWithOwner struct {
@@ -88,10 +90,10 @@ func GetPostByID(postId uint) (*PostResponseWithOwner, error) {
 	defer response.Body.Close()
 
 	if response.StatusCode == http.StatusBadRequest {
-		return nil, echo.NewHTTPError(http.StatusBadRequest, "invalid post ID or bad request")
+		return nil, fmt.Errorf("invalid post ID or bad request")
 	}
 	if response.StatusCode == http.StatusNotFound {
-		return nil, echo.NewHTTPError(http.StatusNotFound, "post not found")
+		return nil, fmt.Errorf("post not found")
 	}
 
 	if response.StatusCode != http.StatusOK {
@@ -119,23 +121,25 @@ type RentRequestResponse struct {
 	PaymentStatus string    `json:"payment_status"`
 }
 
-func (service *RentService) GetRentRequestById(userId, rentRequestId uint) (RentRequestResponse, error) {
-	rentRequest, err := service.repo.GetRentRequestsById(rentRequestId)
+func (service *RentService) GetRentRequestById(userId uint, rentRequestIdStr string) (*RentRequestResponse, error) {
+	rentRequestId, err := strconv.ParseUint(rentRequestIdStr, 10, 32)
+	if err != nil {
+		return nil, err
+	}
+	rentRequest, err := service.repo.GetRentRequestsById(uint(rentRequestId))
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			service.logger.Error("error finding rentRequest", zap.Error(err))
-			return RentRequestResponse{}, echo.NewHTTPError(http.StatusNotFound, "rentRequest not found")
+			return nil, err
 		}
-		service.logger.Error("error retrieving rentRequest", zap.Error(err))
-		return RentRequestResponse{}, echo.NewHTTPError(http.StatusInternalServerError, "failed fo get rentRequest")
+
+		return nil, err
 	}
 
 	if userId != rentRequest.RenterID || userId != rentRequest.OwnerID {
-		service.logger.Error("user ID does not match the rent request", zap.Error(err))
-		return RentRequestResponse{}, echo.NewHTTPError(http.StatusForbidden, "user ID mismatch")
+		return nil, ErrNotAllowed
 	}
 
-	return RentRequestResponse{
+	return &RentRequestResponse{
 		StartDate:     rentRequest.StartDate,
 		EndDate:       rentRequest.EndDate,
 		TotalPrice:    rentRequest.TotalPrice,
@@ -144,25 +148,25 @@ func (service *RentService) GetRentRequestById(userId, rentRequestId uint) (Rent
 	}, nil
 }
 
-func (service *RentService) ConfirmRentRequest(rentRequestId, ownerId uint) error {
-	rentRequest, err := service.repo.GetRentRequestsById(rentRequestId)
+func (service *RentService) ConfirmRentRequest(rentRequestIdStr string, ownerId uint) error {
+	rentRequestId, err := strconv.ParseUint(rentRequestIdStr, 10, 32)
+	if err != nil {
+		return err
+	}
+	rentRequest, err := service.repo.GetRentRequestsById(uint(rentRequestId))
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			service.logger.Error("error finding rentRequest", zap.Error(err))
-			return echo.NewHTTPError(http.StatusNotFound, "rentRequest not found")
+			return ErrRecordNotFound
 		}
-		service.logger.Error("error retrieving rentRequest", zap.Error(err))
-		return echo.NewHTTPError(http.StatusInternalServerError, "failed fo get rentRequest")
+		return err
 	}
 
 	if rentRequest.OwnerID != ownerId {
-		service.logger.Error("owner ID does not match the rent request", zap.Error(err))
-		return echo.NewHTTPError(http.StatusForbidden, "owner ID mismatch")
+		return ErrNotAllowed
 	}
 
 	if rentRequest.Status != "waiting for confirmation" {
-		service.logger.Error("rent request is not in 'waiting for confirmation' state", zap.Error(err))
-		return echo.NewHTTPError(http.StatusForbidden, "rent request cannot be confirmed as it is not in 'waiting for confirmation' state")
+		return ErrNotAllowed
 	}
 
 	rentRequest.Status = "Confirmed"
@@ -170,85 +174,167 @@ func (service *RentService) ConfirmRentRequest(rentRequestId, ownerId uint) erro
 
 	err = service.repo.UpdateRentRequest(rentRequest)
 	if err != nil {
-		service.logger.Error("Error Updating rent request", zap.Error(err))
-		return echo.NewHTTPError(http.StatusInternalServerError, "failed to update rent request")
+		return err
 	}
 	return nil
 
 }
 
-func (service *RentService) PayRentRequest(renterId, rentRequestId uint) error {
-	rentRequest, err := service.repo.GetRentRequestsById(rentRequestId)
+func (service *RentService) PayRentRequest(renterId uint, rentRequestIdStr string) (*string, error) {
+	rentRequestId, err := strconv.ParseUint(rentRequestIdStr, 10, 32)
+	if err != nil {
+		return nil, err
+	}
+
+	rentRequest, err := service.repo.GetRentRequestsById(uint(rentRequestId))
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			service.logger.Error("error finding rentRequest", zap.Error(err))
-			return echo.NewHTTPError(http.StatusNotFound, "rentRequest not found")
+			return nil, ErrRecordNotFound
 		}
-		service.logger.Error("error retrieving rentRequest", zap.Error(err))
-		return echo.NewHTTPError(http.StatusInternalServerError, "failed fo get rentRequest")
+		return nil, err
 	}
 
 	if rentRequest.RenterID != renterId {
-		service.logger.Error("renter ID does not match the rent request", zap.Error(err))
-		return echo.NewHTTPError(http.StatusForbidden, "renter ID mismatch")
+		return nil, ErrNotAllowed
 	}
 
 	if rentRequest.Status != "Confirmed" {
-		service.logger.Error("rent request is not in 'Confirmed' state", zap.Error(err))
-		return echo.NewHTTPError(http.StatusForbidden, "rent request cannot be paid as it is not in 'Confirmed' state")
+		return nil, ErrNotAllowed
 	}
 
-	rentRequest.Status = "Paid"
-	rentRequest.PaymentStatus = "Success"
+	paymentPayload := map[string]interface{}{
+		"requestId":   rentRequest.ID,
+		"amount":      rentRequest.TotalPrice,
+		"callbackURL": fmt.Sprintf("http://localhost:8082/rent-request/callback?requestId=%v", rentRequest.ID),
+	}
+
+	redirectURL, err := service.CreatePaymentRequest(paymentPayload)
+	if err != nil {
+		return nil, err
+	}
+
+	return redirectURL, nil
+}
+
+func (service *RentService) CreatePaymentRequest(paymentPayload map[string]interface{}) (*string, error) {
+	requestBody, err := json.Marshal(paymentPayload)
+	if err != nil {
+		return nil, err
+	}
+
+	request, err := http.NewRequest("POST", "http://localhost:8083/payment/request", bytes.NewBuffer(requestBody))
+	if err != nil {
+		return nil, err
+	}
+
+	request.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	response, err := client.Do(request)
+	if err != nil {
+		return nil, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusCreated {
+		return nil, fmt.Errorf("an error occurred: status code %d", response.StatusCode)
+	}
+
+	var result struct {
+		RedirectURL string `json:"redirectURL"`
+	}
+
+	if err = json.NewDecoder(response.Body).Decode(&result); err != nil {
+		return nil, err
+	}
+
+	return &result.RedirectURL, nil
+}
+
+func (service *RentService) UpdateRentRequestPaymentStatus(rentRequestIdStr, status string) (*string, error) {
+	rentRequestId, err := strconv.ParseUint(rentRequestIdStr, 10, 32)
+	if err != nil {
+		return nil, err
+	}
+	rentRequest, err := service.repo.GetRentRequestsById(uint(rentRequestId))
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, err
+		}
+		return nil, err
+	}
+
+	if rentRequest.PaymentStatus == "success" {
+		return nil, err
+	}
+
+	if rentRequest.Status != "Confirmed" {
+		return nil, err
+	}
+
+	if status != "success" && status != "cancel" {
+		return nil, err
+	}
+
+	rentRequest.PaymentStatus = status
 	rentRequest.UpdatedAt = time.Now()
 
-	err = service.repo.UpdateRentRequest(rentRequest)
-	if err != nil {
-		service.logger.Error("Error Updating rent request", zap.Error(err))
-		return echo.NewHTTPError(http.StatusInternalServerError, "failed to update rent request")
-	}
-
-	statuses := []string{"waiting for confirmation", "Confirmed"}
-	postId := rentRequest.PostID
-	startDate := rentRequest.StartDate
-	endDate := rentRequest.EndDate
-	for _, status := range statuses {
-		rentRequestList, err := service.repo.GetOvelappingRequest(postId, status, startDate, endDate)
+	if status == "success" {
+		rentRequest.Status = "paid"
+		err = service.repo.UpdateRentRequest(rentRequest)
 		if err != nil {
-			service.logger.Error("error checking existing rent requests", zap.Error(err))
-			return echo.NewHTTPError(http.StatusInternalServerError, "error checking existing rent requests")
+			return nil, err
 		}
 
-		for _, overlappingRequest := range rentRequestList {
-			overlappingRequest.Status = "Rejected"
-			overlappingRequest.UpdatedAt = time.Now()
-			err = service.repo.UpdateRentRequest(&overlappingRequest)
+		states := []string{"waiting for confirmation", "Confirmed"}
+		postId := rentRequest.PostID
+		startDate := rentRequest.StartDate
+		endDate := rentRequest.EndDate
+		for _, state := range states {
+			rentRequestList, err := service.repo.GetOvelappingRequest(postId, state, startDate, endDate)
 			if err != nil {
-				service.logger.Error("Error rejecting overlaping rent request", zap.Error(err))
-				return echo.NewHTTPError(http.StatusInternalServerError, "failed to reject overlapping rent request")
+				return nil, err
+			}
+
+			for _, overlappingRequest := range rentRequestList {
+				if overlappingRequest.ID != uint(rentRequestId) {
+					overlappingRequest.Status = "Rejected"
+					overlappingRequest.UpdatedAt = time.Now()
+					err = service.repo.UpdateRentRequest(&overlappingRequest)
+					if err != nil {
+						return nil, err
+					}
+				}
 			}
 		}
 
+		message := "Your payment was processed successfully!"
+
+		return &message, nil
 	}
-
-	return nil
-
+	err = service.repo.UpdateRentRequest(rentRequest)
+	if err != nil {
+		return nil, err
+	}
+	message := "Your payment has been canceled"
+	return &message, nil
 }
 
-func (service *RentService) CancelRentRequest(renterId, rentRequestId uint) error {
-	rentRequest, err := service.repo.GetRentRequestsById(rentRequestId)
+func (service *RentService) CancelRentRequest(renterId uint, rentRequestIdStr string) error {
+	rentRequestId, err := strconv.ParseUint(rentRequestIdStr, 10, 32)
+	if err != nil {
+		return err
+	}
+
+	rentRequest, err := service.repo.GetRentRequestsById(uint(rentRequestId))
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			service.logger.Error("error finding rentRequest", zap.Error(err))
-			return echo.NewHTTPError(http.StatusNotFound, "rentRequest not found")
+			return ErrRecordNotFound
 		}
-		service.logger.Error("error retrieving rentRequest", zap.Error(err))
-		return echo.NewHTTPError(http.StatusInternalServerError, "failed fo get rentRequest")
+		return err
 	}
 
 	if rentRequest.RenterID != renterId {
-		service.logger.Error("renter ID does not match the rent request", zap.Error(err))
-		return echo.NewHTTPError(http.StatusForbidden, "renter ID mismatch")
+		return err
 	}
 
 	if rentRequest.Status == "Confirmed" || rentRequest.Status == "waiting for confirmation" {
@@ -256,23 +342,51 @@ func (service *RentService) CancelRentRequest(renterId, rentRequestId uint) erro
 		rentRequest.UpdatedAt = time.Now()
 		err := service.repo.UpdateRentRequest(rentRequest)
 		if err != nil {
-			service.logger.Error("Error canceling rent request", zap.Error(err))
-			return echo.NewHTTPError(http.StatusInternalServerError, "failed to cancel rent request")
+			return err
 		}
 
 	} else {
-		service.logger.Error("rent request is not in 'Confirmed' or 'waiting for confirmation' state", zap.Error(err))
-		return echo.NewHTTPError(http.StatusForbidden, "rent request cannot be paid as it is not in 'Confirmed' state")
+		return err
 	}
 	return nil
 }
 
-func (service *RentService) GetOwnerRentRequests(ownerId uint, status string, minDate, maxDate *time.Time, page, size int) ([]RentRequestResponse, error) {
+func (service *RentService) GetOwnerRentRequests(ownerId uint, status, dateStr, pageStr string) ([]RentRequestResponse, error) {
+	var minDate, maxDate *time.Time
+	if dateStr != "" {
+		date := strings.Split(dateStr, ",")
+		if date[0] != "" {
+			min, err := time.Parse("2006-01-02", date[0])
+			if err != nil {
+				return nil, err
+			}
+			minDate = &min
+		}
+		if date[1] != "" {
+			max, err := time.Parse("2006-01-02", date[1])
+			if err != nil {
+				return nil, err
+			}
+			maxDate = &max
+		}
+		if minDate != nil && maxDate != nil {
+			if minDate.After(*maxDate) {
+				return nil, fmt.Errorf("invalid date")
+			}
+		}
+	}
+
+	page, err := strconv.Atoi(pageStr)
+	if err != nil || page < 1 {
+		page = 1
+	}
+
+	size := 10
+
 	offset := (page - 1) * size
 	rents, err := service.repo.GetOwnerRentRequests(ownerId, status, minDate, maxDate, offset, size)
 	if err != nil {
-		service.logger.Error("fail getting rents", zap.Error(err))
-		return nil, echo.NewHTTPError(http.StatusInternalServerError, "fail to fetch rents")
+		return nil, err
 	}
 
 	var rentResponseList []RentRequestResponse
@@ -289,12 +403,40 @@ func (service *RentService) GetOwnerRentRequests(ownerId uint, status string, mi
 	return rentResponseList, nil
 }
 
-func (service *RentService) GetRenterRentRequests(renterId uint, status string, minDate, maxDate *time.Time, page, size int) ([]RentRequestResponse, error) {
+func (service *RentService) GetRenterRentRequests(renterId uint, status, dateStr, pageStr string) ([]RentRequestResponse, error) {
+	var minDate, maxDate *time.Time
+	if dateStr != "" {
+		date := strings.Split(dateStr, ",")
+		if date[0] != "" {
+			min, err := time.Parse("2006-01-02", date[0])
+			if err != nil {
+				return nil, err
+			}
+			minDate = &min
+		}
+		if date[1] != "" {
+			max, err := time.Parse("2006-01-02", date[1])
+			if err != nil {
+				return nil, err
+			}
+			maxDate = &max
+		}
+		if minDate != nil && maxDate != nil {
+			if minDate.After(*maxDate) {
+				return nil, fmt.Errorf("invalid date")
+			}
+		}
+	}
+	page, err := strconv.Atoi(pageStr)
+	if err != nil || page < 1 {
+		page = 1
+	}
+
+	size := 10
 	offset := (page - 1) * size
 	rents, err := service.repo.GetRenterRentRequests(renterId, status, minDate, maxDate, offset, size)
 	if err != nil {
-		service.logger.Error("fail getting rents", zap.Error(err))
-		return nil, echo.NewHTTPError(http.StatusInternalServerError, "fail to fetch rents")
+		return nil, err
 	}
 
 	var rentResponseList []RentRequestResponse

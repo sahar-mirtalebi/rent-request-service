@@ -7,17 +7,17 @@ import (
 )
 
 type RentRequest struct {
-	ID            uint      `gorm:"primaryKey" json:"id"`
-	RenterID      uint      `json:"renter_id"`
-	OwnerID       uint      `json:"owner_id"`
-	PostID        uint      `json:"post_id"`
-	StartDate     time.Time `json:"start_date" validate:"required"`
-	EndDate       time.Time `json:"end_date" validate:"required"`
-	TotalPrice    int       `json:"total_price"`
-	Status        string    `json:"status"`
-	PaymentStatus string    `json:"payment_status"`
-	CreatedAt     time.Time `json:"created_at"`
-	UpdatedAt     time.Time `json:"updated_at"`
+	ID            uint
+	RenterID      uint
+	OwnerID       uint
+	PostID        uint
+	StartDate     time.Time
+	EndDate       time.Time
+	TotalPrice    int
+	Status        string
+	PaymentStatus string
+	CreatedAt     time.Time
+	UpdatedAt     time.Time
 }
 
 type RentRepository struct {
@@ -35,15 +35,6 @@ func (rentRepo *RentRepository) AddRentRequest(rentRequest *RentRequest) error {
 func (rentRepo *RentRepository) UpdateRentRequest(rentRequest *RentRequest) error {
 	return rentRepo.db.Save(&rentRequest).Error
 }
-
-// func (rentRepo *RentRepository) GetRentRequestsByPostId(postId uint) ([]RentRequest, error) {
-// 	var rentRequestList []RentRequest
-// 	err := rentRepo.db.Where("post_id = ?", postId).Find(&rentRequestList).Error
-// 	if err != nil {
-// 		return nil, err
-// 	}
-// 	return rentRequestList, nil
-// }
 
 func (rentRepo *RentRepository) GetOvelappingRequest(postId uint, status string, startDate, endDate time.Time) ([]RentRequest, error) {
 	var rentRequestList []RentRequest

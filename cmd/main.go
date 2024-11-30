@@ -7,6 +7,7 @@ import (
 
 	"github.com/go-playground/validator/v10"
 	"github.com/labstack/echo/v4"
+	"github.com/labstack/echo/v4/middleware"
 	"go.uber.org/fx"
 	"go.uber.org/zap"
 	"gorm.io/driver/postgres"
@@ -22,13 +23,13 @@ func NewDB() (*gorm.DB, error) {
 	return db, nil
 }
 
-func NewLogger() (*zap.Logger, error) {
-	logger, err := zap.NewProduction()
-	if err != nil {
-		return nil, err
-	}
-	return logger, nil
-}
+// func NewLogger() (*zap.Logger, error) {
+// 	logger, err := zap.NewProduction()
+// 	if err != nil {
+// 		return nil, err
+// 	}
+// 	return logger, nil
+// }
 
 func NewValidator() *validator.Validate {
 	return validator.New()
@@ -40,19 +41,27 @@ func RegisterRoutes(e *echo.Echo, handler *rent.RentHandler) {
 	rentRequestGroup.POST("", handler.CreateRentRequest)
 	rentRequestGroup.GET("/:rentRequestId", handler.GetRentRequestById)
 	rentRequestGroup.PUT("/:rentRequestId/confirm", handler.ConfirmRentRequest)
-	rentRequestGroup.PUT("/:rentRequestId/pay", handler.PayRentRequest)
+	rentRequestGroup.POST("/:rentRequestId/pay", handler.PayRentRequest)
 	rentRequestGroup.PUT("/:rentRequestId/cancel", handler.CancelRentRequest)
 	rentRequestGroup.GET("/owner", handler.GetOwnerRentRequests)
 	rentRequestGroup.GET("/renter", handler.GetRenterRentRequests)
+
+	e.GET("/rent-request/callback", handler.UpdateRentRequestPaymentStatus)
 }
 
 func main() {
 	e := echo.New()
 
+	e.Use(middleware.CORSWithConfig(middleware.CORSConfig{
+		AllowOrigins: []string{"http://localhost:8083"},
+		AllowMethods: []string{echo.GET, echo.POST, echo.PUT, echo.DELETE},
+		AllowHeaders: []string{echo.HeaderContentType, echo.HeaderAuthorization},
+	}))
+
 	app := fx.New(
 		fx.Provide(
 			NewDB,
-			NewLogger,
+			// NewLogger,
 			NewValidator,
 			rent.NewRentRepository,
 			rent.NewRentService,
